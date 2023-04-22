@@ -1,0 +1,6 @@
+*.fseventsd
+*.metadata_never_index
+boot_out.txt
+lib/
+secrets.py
+
