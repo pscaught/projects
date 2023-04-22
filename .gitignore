@@ -3,4 +3,5 @@
 boot_out.txt
 lib/
 secrets.py
+test/
 
