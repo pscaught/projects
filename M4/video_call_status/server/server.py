@@ -2,10 +2,13 @@
 """Monitor whether a camera or microphone is active on macOS"""
 
 import json
+import logging
 import threading
 import subprocess
 from flask import Flask, jsonify
 
+DATA_FILE_PATH="data.json"
+DATA_LOCK = threading.Lock()
 DEBUG = True
 
 app = Flask(__name__)
@@ -20,22 +23,26 @@ def index():
 @app.route("/data.json")
 def get_data():
     """Read from json file and serve the contents at /data.json"""
-    with open("data.json", "r", encoding="utf-8") as _f:
-        _data = json.load(_f)
+    try:
+        with open(DATA_FILE_PATH, "r", encoding="utf-8") as _f:
+            _data = json.load(_f)
+    except json.JSONDecodeError:
+        _data = {"camActive": False, "micActive": False}
     return jsonify(_data)
 
 
 def write_file(_data):
     """Helper function to write data to file"""
-    with open("data.json", "w", encoding="utf-8") as _f:
+    with open(DATA_FILE_PATH, "w", encoding="utf-8") as _f:
         _f.write(json.dumps(_data))
 
 
-def update_data():
+def main():
     """Main function that follows the output of a `log stream` command with
     custom filters that check for hints that a camera or microphone has been
     activated or deactivated. Results are then stored in a json file.
     """
+    logging.basicConfig(level=logging.DEBUG)
     cmd = [
         "log",
         "stream",
@@ -66,11 +73,9 @@ def update_data():
                 states["micActive"] = mic_active_state
 
             if mic_active_state != previous_mic_active_state:
-                if DEBUG:
-                    print(
-                        f"Microphone is {'active' if mic_active_state else 'not active'}"
-                    )
-                write_file(states)
+                logging.debug(f"Microphone is {'active' if mic_active_state else 'not active'}")
+                with DATA_LOCK:
+                    write_file(states)
                 previous_mic_active_state = mic_active_state
 
             # Camera
@@ -88,13 +93,14 @@ def update_data():
             states["camActive"] = cam_active_state
 
             if cam_active_state != previous_cam_active_state:
-                if DEBUG:
-                    print(f"Camera is {'active' if cam_active_state else 'not active'}")
-                write_file(states)
+                logging.debug(f"Camera is {'active' if cam_active_state else 'not active'}")
+                with DATA_LOCK:
+                    write_file(states)
                 previous_cam_active_state = cam_active_state
 
 
 if __name__ == "__main__":
+    # Start the Flask app in a separate thread
     flask_thread = threading.Thread(
         target=lambda: app.run(
             host="192.168.10.10", port=8000, debug=True, use_reloader=False
@@ -102,4 +108,6 @@ if __name__ == "__main__":
         daemon=True,
     )
     flask_thread.start()
-    update_data()
+
+    # Start the data processing in the main thread
+    main()
