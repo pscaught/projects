@@ -163,7 +163,7 @@ def get_local_time():
         url_encode("%Y-%m-%d %H:%M:%S.%L %j %u %z %Z"),
     )
 
-    reply = requests.get(aio_url_formatted).text
+    reply = requests.get(aio_url_formatted, timeout=5).text
     if reply:
         times = reply.split(" ")
         the_date = times[0]
@@ -184,12 +184,15 @@ def get_local_time():
 
 def get_data(server="192.168.10.10", port=8000):
     try:
-        data = requests.get(f"http://{server}:{port}/data.json", timeout=2).json()
+        r = requests.get(f"http://{server}:{port}/data.json", timeout=5)
+        data = r.json()
+        r.close()
+        print('got data')
         gc.collect()
         return data
     except Exception as e:
         gc.collect()
-        #print('Error getting data', e)
+        print('error getting data', e)
         return None
 
 
@@ -294,9 +297,10 @@ while True:
             background_group[4].hidden = False
             background_group[5].hidden = True
             server_active = False
+            # check again in 20 seconds
             last_check_devices = time.monotonic() + 20
             print("the server is not responding")
-        print("current free memory:", gc.mem_free())
+        #print("current free memory:", gc.mem_free())
 
     if server_active:
         update_time(small=True)
