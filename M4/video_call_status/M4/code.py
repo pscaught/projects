@@ -2,24 +2,36 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Metro Matrix Clock
+# Video Call Status and Clock
 # Runs on Airlift Metro M4 with 64x32 RGB Matrix display & shield
 
 import board
+import busio
 import displayio
 import gc
-import terminalio
+import rtc
+
+# import terminalio
 import time
 from adafruit_display_text.label import Label
 from adafruit_bitmap_font import bitmap_font
 from adafruit_matrixportal.matrix import Matrix
-from adafruit_matrixportal.network import Network
+
+from digitalio import DigitalInOut
+import adafruit_esp32spi.adafruit_esp32spi_socket as socket
+from adafruit_esp32spi import adafruit_esp32spi
+import adafruit_requests as requests
+
+# from adafruit_matrixportal.network import Network
 from adafruit_display_shapes.circle import Circle
 from adafruit_display_shapes.rect import Rect
 from adafruit_display_shapes.roundrect import RoundRect
 
 BLINK = True
 DEBUG = False
+AIO_URL = "https://io.adafruit.com/api/v2/%s/integrations/time/strftime?x-aio-key=%s&tz=%s&fmt=%s"
+
+# --- Network setup ---
 
 # Get wifi details and more from a secrets.py file
 try:
@@ -27,14 +39,77 @@ try:
 except ImportError:
     print("WiFi secrets are kept in secrets.py, please add them there!")
     raise
-print("    Metro Minimal Clock")
+print("    Video Call Status and Clock")
 print("Time will be set for {}".format(secrets["timezone"]))
+
+esp32_cs = DigitalInOut(board.ESP_CS)
+esp32_ready = DigitalInOut(board.ESP_BUSY)
+esp32_reset = DigitalInOut(board.ESP_RESET)
+
+spi = busio.SPI(board.SCK, board.MOSI, board.MISO)
+esp = adafruit_esp32spi.ESP_SPIcontrol(spi, esp32_cs, esp32_ready, esp32_reset)
+
+print("Connecting to AP...")
+while not esp.is_connected:
+    try:
+        esp.connect_AP(secrets["ssid"], secrets["password"])
+    except ConnectionError as e:
+        print("could not connect to AP, retrying: ", e)
+        continue
+print("Connected to", str(esp.ssid, "utf-8"), "\tRSSI:", esp.rssi)
+
+# Initialize a requests object with a socket and esp32spi interface
+socket.set_interface(esp)
+requests.set_socket(socket, esp)
+
+
+def url_encode(url):
+    return url.replace(" ", "+").replace("%", "%25").replace(":", "%3A")
+
+
+def get_local_time():
+    aio_url_formatted = AIO_URL % (
+        secrets["aio_username"],
+        secrets["aio_key"],
+        url_encode(secrets["timezone"]),
+        url_encode("%Y-%m-%d %H:%M:%S.%L %j %u %z %Z"),
+    )
+
+    reply = requests.get(aio_url_formatted).text
+    if reply:
+        times = reply.split(" ")
+        the_date = times[0]
+        the_time = times[1]
+        year_day = int(times[2])
+        week_day = int(times[3])
+        is_dst = None  # no way to know yet
+        year, month, mday = [int(x) for x in the_date.split("-")]
+        the_time = the_time.split(".")[0]
+        hours, minutes, seconds = [int(x) for x in the_time.split(":")]
+        now = time.struct_time(
+            (year, month, mday, hours, minutes, seconds, week_day, year_day, is_dst)
+        )
+
+        if rtc is not None:
+            rtc.RTC().datetime = now
+    gc.collect()
+
+
+def data_fetch():
+    try:
+        data = requests.get("http://192.168.10.10:8000/data.json", timeout=1).json()
+        gc.collect()
+        return data
+    except:
+        return None
+
+
+# network = Network(status_neopixel=board.NEOPIXEL, debug=False)
+
 
 # --- Display setup ---
 matrix = Matrix()
 display = matrix.display
-network = Network(status_neopixel=board.NEOPIXEL, debug=False)
-
 
 # --- Drawing setup ---
 color = displayio.Palette(4)  # Create a color palette
@@ -111,6 +186,7 @@ cam_mute_group.hidden = True
 background_group.append(cam_mute_group)  # index 2
 
 
+gc.collect()
 # same as the camera slash above
 mic_mute_group = displayio.Group()
 for i in range(16):
@@ -125,7 +201,7 @@ font_small = bitmap_font.load_font("/Teeny-Tiny-Pixls-5.bdf")
 font_big = bitmap_font.load_font("/IBMPlexMono-Medium-24_jep.bdf")
 
 clock_label_big = Label(font_big, padding_top=0, background_color=None)
-clock_label_big.hidden = False # this is all we show by default
+clock_label_big.hidden = False  # this is all we show by default
 clock_label_small = Label(font_small, padding_top=0, background_color=None)
 clock_label_small.hidden = True
 
@@ -165,7 +241,9 @@ def update_time(*, hours=None, minutes=None, show_colon=False, small=False):
         BLINK = not BLINK
     else:
         colon = ":"
-        BLINK = not BLINK # TODO: this will currently always enable blink on the next pass
+        BLINK = (
+            not BLINK
+        )  # TODO: this will currently always enable blink on the next pass
 
     clock_label.text = "{hours}{colon}{minutes:02d}".format(
         hours=hours, minutes=minutes, colon=colon
@@ -193,7 +271,7 @@ while True:
             update_time(
                 small=True, show_colon=True
             )  # Make sure a colon is displayed while updating
-            network.get_local_time()  # Synchronize Board's clock to Internet
+            get_local_time()  # Synchronize Board's clock to Internet
             last_check_time = time.monotonic()
             # print memory usage once an hour
             print("current mem", gc.mem_free())
@@ -209,33 +287,40 @@ while True:
         # background_group[3] is mic mute slash
         # background_group[4] is big clock
         # background_group[5] is small clock
-        #TODO: this is sometimes failing even when the server is running
-        try:
-            data = network.fetch(
-                "http://192.168.10.10:8000/data.json", timeout=1
-            ).json()
+        # TODO: this is sometimes failing even when the server is running
+        _data = data_fetch()
+        if _data is not None:
+            print("got new data from server")
+            # data = network.fetch(
+            #    "http://192.168.10.10:8000/data.json", timeout=1
+            # ).json()
             background_group[1].hidden = False
-            background_group[2].hidden = True if data.get("camActive", False) else False
-            background_group[3].hidden = True if data.get("micActive", False) else False
+            background_group[2].hidden = (
+                True if _data.get("camActive", False) else False
+            )
+            background_group[3].hidden = (
+                True if _data.get("micActive", False) else False
+            )
             background_group[4].hidden = True
             background_group[5].hidden = False
             server_active = True
             last_check_devices = time.monotonic()
-        except Exception as e: #TODO: not sure what exception this actually is. Tried catching OutOfRetries and it didn't work
+        else:
             background_group[1].hidden = True
             background_group[2].hidden = True
             background_group[3].hidden = True
             background_group[4].hidden = False
             background_group[5].hidden = True
             server_active = False
-            last_check_devices = time.monotonic() + 10
-            # print('the server is not responding', e)
+            last_check_devices = time.monotonic() + 20
+            print("the server is not responding")
+        print("current free memory:", gc.mem_free())
 
     if server_active:
         update_time(small=True)
     else:
         update_time(small=False)
 
-    gc.collect()
+    # gc.collect()
     # print(gc.mem_free())
     time.sleep(1)
