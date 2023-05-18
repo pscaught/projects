@@ -5,31 +5,26 @@
 # Video Call Status and Clock
 # Runs on Airlift Metro M4 with 64x32 RGB Matrix display & shield
 
+import adafruit_esp32spi.adafruit_esp32spi_socket as socket
+import adafruit_requests as requests
 import board
 import busio
 import displayio
 import gc
 import rtc
-
-# import terminalio
 import time
-from adafruit_display_text.label import Label
-from adafruit_bitmap_font import bitmap_font
-from adafruit_matrixportal.matrix import Matrix
-
-from digitalio import DigitalInOut
-import adafruit_esp32spi.adafruit_esp32spi_socket as socket
-from adafruit_esp32spi import adafruit_esp32spi
-import adafruit_requests as requests
-
-# from adafruit_matrixportal.network import Network
 from adafruit_display_shapes.circle import Circle
 from adafruit_display_shapes.rect import Rect
 from adafruit_display_shapes.roundrect import RoundRect
+from adafruit_display_text.label import Label
+from adafruit_esp32spi import adafruit_esp32spi
+from adafruit_bitmap_font import bitmap_font
+from adafruit_matrixportal.matrix import Matrix
+from digitalio import DigitalInOut
 
+AIO_URL = "https://io.adafruit.com/api/v2/%s/integrations/time/strftime?x-aio-key=%s&tz=%s&fmt=%s"
 BLINK = True
 DEBUG = False
-AIO_URL = "https://io.adafruit.com/api/v2/%s/integrations/time/strftime?x-aio-key=%s&tz=%s&fmt=%s"
 
 # --- Network setup ---
 
@@ -63,50 +58,6 @@ socket.set_interface(esp)
 requests.set_socket(socket, esp)
 
 
-def url_encode(url):
-    return url.replace(" ", "+").replace("%", "%25").replace(":", "%3A")
-
-
-def get_local_time():
-    aio_url_formatted = AIO_URL % (
-        secrets["aio_username"],
-        secrets["aio_key"],
-        url_encode(secrets["timezone"]),
-        url_encode("%Y-%m-%d %H:%M:%S.%L %j %u %z %Z"),
-    )
-
-    reply = requests.get(aio_url_formatted).text
-    if reply:
-        times = reply.split(" ")
-        the_date = times[0]
-        the_time = times[1]
-        year_day = int(times[2])
-        week_day = int(times[3])
-        is_dst = None  # no way to know yet
-        year, month, mday = [int(x) for x in the_date.split("-")]
-        the_time = the_time.split(".")[0]
-        hours, minutes, seconds = [int(x) for x in the_time.split(":")]
-        now = time.struct_time(
-            (year, month, mday, hours, minutes, seconds, week_day, year_day, is_dst)
-        )
-
-        if rtc is not None:
-            rtc.RTC().datetime = now
-    gc.collect()
-
-
-def data_fetch():
-    try:
-        data = requests.get("http://192.168.10.10:8000/data.json", timeout=1).json()
-        gc.collect()
-        return data
-    except:
-        return None
-
-
-# network = Network(status_neopixel=board.NEOPIXEL, debug=False)
-
-
 # --- Display setup ---
 matrix = Matrix()
 display = matrix.display
@@ -135,41 +86,31 @@ display.show(background_group)
 # below is the result of trial and error creating a simple camera shape
 device_group = displayio.Group()
 cam_body = RoundRect(10, 10, 21, 12, 2, fill=color[2], outline=color[2], stroke=1)
-device_group.append(cam_body)
-
 cam_top1 = RoundRect(17, 7, 7, 3, 2, fill=color[2], outline=color[2], stroke=1)
-device_group.append(cam_top1)
-
 cam_top2 = RoundRect(16, 8, 9, 2, 2, fill=color[2], outline=color[2], stroke=1)
-device_group.append(cam_top2)
-
 cam_lens = Circle(20, 15, 4, fill=color[0])
+device_group.append(cam_body)
+device_group.append(cam_top1)
+device_group.append(cam_top2)
 device_group.append(cam_lens)
 
 # Mic
 
 # below is the result of trial and error creating a simple microphone shape
 mic_body = RoundRect(44, 7, 5, 10, 2, fill=color[2], outline=color[2], stroke=1)
-device_group.append(mic_body)
-
 mic_base_left1 = Rect(42, 15, 1, 2, fill=color[2])
-device_group.append(mic_base_left1)
-
 mic_base_left2 = Rect(43, 17, 1, 1, fill=color[2])
-device_group.append(mic_base_left2)
-
 mic_base_top = Rect(44, 18, 5, 1, fill=color[2])
-device_group.append(mic_base_top)
-
 mic_base_right1 = Rect(50, 15, 1, 2, fill=color[2])
-device_group.append(mic_base_right1)
-
 mic_base_right2 = Rect(49, 17, 1, 1, fill=color[2])
-device_group.append(mic_base_right2)
-
 mic_base_bottom = Rect(46, 18, 1, 5, fill=color[2])
+device_group.append(mic_body)
+device_group.append(mic_base_left1)
+device_group.append(mic_base_left2)
+device_group.append(mic_base_top)
+device_group.append(mic_base_right1)
+device_group.append(mic_base_right2)
 device_group.append(mic_base_bottom)
-
 device_group.hidden = True  # Hide it initially
 
 background_group.append(device_group)  # index 1
@@ -204,6 +145,53 @@ clock_label_big = Label(font_big, padding_top=0, background_color=None)
 clock_label_big.hidden = False  # this is all we show by default
 clock_label_small = Label(font_small, padding_top=0, background_color=None)
 clock_label_small.hidden = True
+background_group.append(clock_label_big)  # index 4
+background_group.append(clock_label_small)  # index 5
+
+# --- Functions ---
+
+
+def url_encode(url):
+    return url.replace(" ", "+").replace("%", "%25").replace(":", "%3A")
+
+
+def get_local_time():
+    aio_url_formatted = AIO_URL % (
+        secrets["aio_username"],
+        secrets["aio_key"],
+        url_encode(secrets["timezone"]),
+        url_encode("%Y-%m-%d %H:%M:%S.%L %j %u %z %Z"),
+    )
+
+    reply = requests.get(aio_url_formatted).text
+    if reply:
+        times = reply.split(" ")
+        the_date = times[0]
+        the_time = times[1]
+        year_day = int(times[2])
+        week_day = int(times[3])
+        is_dst = None  # no way to know yet
+        year, month, mday = [int(x) for x in the_date.split("-")]
+        the_time = the_time.split(".")[0]
+        hours, minutes, seconds = [int(x) for x in the_time.split(":")]
+        now = time.struct_time(
+            (year, month, mday, hours, minutes, seconds, week_day, year_day, is_dst)
+        )
+
+        if rtc is not None:
+            rtc.RTC().datetime = now
+    gc.collect()
+
+def get_data(server="192.168.10.10", port=8000):
+    try:
+        data = requests.get(f"http://{server}:{port}/data.json", timeout=2).json()
+        gc.collect()
+        return data
+    except Exception as e:
+        gc.collect()
+        #print('Error getting data', e)
+        return None
+
 
 
 def update_time(*, hours=None, minutes=None, show_colon=False, small=False):
@@ -260,8 +248,6 @@ def update_time(*, hours=None, minutes=None, show_colon=False, small=False):
 last_check_devices = None
 last_check_time = None
 update_time(show_colon=True)  # Display whatever time is on the board
-background_group.append(clock_label_big)  # index 4
-background_group.append(clock_label_small)  # index 5
 server_active = False
 
 while True:
@@ -288,12 +274,8 @@ while True:
         # background_group[4] is big clock
         # background_group[5] is small clock
         # TODO: this is sometimes failing even when the server is running
-        _data = data_fetch()
+        _data = get_data()
         if _data is not None:
-            print("got new data from server")
-            # data = network.fetch(
-            #    "http://192.168.10.10:8000/data.json", timeout=1
-            # ).json()
             background_group[1].hidden = False
             background_group[2].hidden = (
                 True if _data.get("camActive", False) else False
