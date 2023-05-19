@@ -44,15 +44,20 @@ esp32_reset = DigitalInOut(board.ESP_RESET)
 spi = busio.SPI(board.SCK, board.MOSI, board.MISO)
 esp = adafruit_esp32spi.ESP_SPIcontrol(spi, esp32_cs, esp32_ready, esp32_reset)
 
-print("Connecting to AP...")
-while not esp.is_connected:
-    try:
-        esp.connect_AP(secrets["ssid"], secrets["password"])
-    except ConnectionError as e:
-        print("could not connect to AP, retrying: ", e)
-        continue
-print("Connected to", str(esp.ssid, "utf-8"), "\tRSSI:", esp.rssi)
 
+def connect():
+    while not esp.is_connected:
+        try:
+            print("Connecting to AP...")
+            esp.connect_AP(secrets["ssid"], secrets["password"])
+        except ConnectionError as e:
+            print("could not connect to AP, retrying: ", e)
+            continue
+        print("Connected to", str(esp.ssid, "utf-8"), "\tRSSI:", esp.rssi)
+    else:
+        return
+
+connect()
 # Initialize a requests object with a socket and esp32spi interface
 socket.set_interface(esp)
 requests.set_socket(socket, esp)
@@ -162,21 +167,22 @@ def get_local_time():
         url_encode(secrets["timezone"]),
         url_encode("%Y-%m-%d %H:%M:%S.%L %j %u %z %Z"),
     )
-
-    reply = requests.get(aio_url_formatted, timeout=5).text
-    if reply:
-        times = reply.split(" ")
-        the_date = times[0]
-        the_time = times[1]
-        year_day = int(times[2])
-        week_day = int(times[3])
-        is_dst = None  # no way to know yet
-        year, month, mday = [int(x) for x in the_date.split("-")]
-        the_time = the_time.split(".")[0]
-        hours, minutes, seconds = [int(x) for x in the_time.split(":")]
-        now = time.struct_time(
-            (year, month, mday, hours, minutes, seconds, week_day, year_day, is_dst)
-        )
+    connect()
+    with requests.get(aio_url_formatted, timeout=5) as r:
+        reply = r.text
+        if reply:
+            times = reply.split(" ")
+            the_date = times[0]
+            the_time = times[1]
+            year_day = int(times[2])
+            week_day = int(times[3])
+            is_dst = None  # no way to know yet
+            year, month, mday = [int(x) for x in the_date.split("-")]
+            the_time = the_time.split(".")[0]
+            hours, minutes, seconds = [int(x) for x in the_time.split(":")]
+            now = time.struct_time(
+                (year, month, mday, hours, minutes, seconds, week_day, year_day, is_dst)
+            )
 
         if rtc is not None:
             rtc.RTC().datetime = now
@@ -184,9 +190,9 @@ def get_local_time():
 
 def get_data(server="192.168.10.10", port=8000):
     try:
-        r = requests.get(f"http://{server}:{port}/data.json", timeout=5)
-        data = r.json()
-        r.close()
+        connect()
+        with requests.get(f"http://{server}:{port}/data.json", timeout=5) as r:
+            data = r.json()
         print('got data')
         gc.collect()
         return data
@@ -309,4 +315,5 @@ while True:
 
     # gc.collect()
     # print(gc.mem_free())
+    print('tick')
     time.sleep(1)

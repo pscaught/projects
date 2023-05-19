@@ -47,7 +47,7 @@ def main():
         "log",
         "stream",
         "--predicate",
-        '(subsystem contains "com.apple.UVCExtension" and composedMessage contains "Post PowerLog") || eventMessage contains "Post event kCameraStream" || composedMessage contains "numRunningAudioEngines"',
+        '(subsystem contains "com.apple.UVCExtension" and composedMessage contains "Post PowerLog") || eventMessage contains "Post event kCameraStream" || composedMessage contains "PublishRecordingClientInfo: Report"',
     ]
 
     with subprocess.Popen(
@@ -64,11 +64,11 @@ def main():
             line = line.decode("utf-8").rstrip()
 
             # Microphone
-            if "numRunningAudioEngines =" in line:
-                try:
-                    mic_active_state = bool(int(line[-1]) > 0)
-                except ValueError:
-                    continue
+            if "PublishRecordingClientInfo: Report" in line:
+                if 'yes' in line:
+                    mic_active_state = True
+                elif 'no' in line:
+                    mic_active_state = False
 
                 states["micActive"] = mic_active_state
 
