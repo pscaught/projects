@@ -10,7 +10,6 @@ from flask import Flask, jsonify
 DATA_FILE_PATH = "data.json"
 DATA_LOCK = threading.Lock()
 DEBUG = True
-MIC_CLIENTS = []
 
 app = Flask(__name__)
 
