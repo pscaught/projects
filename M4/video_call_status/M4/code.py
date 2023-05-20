@@ -57,7 +57,6 @@ def connect():
     else:
         return
 
-connect()
 # Initialize a requests object with a socket and esp32spi interface
 socket.set_interface(esp)
 requests.set_socket(socket, esp)
@@ -132,7 +131,7 @@ cam_mute_group.hidden = True
 background_group.append(cam_mute_group)  # index 2
 
 
-gc.collect()
+#gc.collect()
 # same as the camera slash above
 mic_mute_group = displayio.Group()
 for i in range(16):
@@ -168,7 +167,7 @@ def get_local_time():
         url_encode("%Y-%m-%d %H:%M:%S.%L %j %u %z %Z"),
     )
     connect()
-    with requests.get(aio_url_formatted, timeout=5) as r:
+    with requests.get(aio_url_formatted, timeout=10) as r:
         reply = r.text
         if reply:
             times = reply.split(" ")
@@ -183,22 +182,27 @@ def get_local_time():
             now = time.struct_time(
                 (year, month, mday, hours, minutes, seconds, week_day, year_day, is_dst)
             )
+        r.close()
 
         if rtc is not None:
             rtc.RTC().datetime = now
-    gc.collect()
+    #gc.collect()
 
 def get_data(server="192.168.10.10", port=8000):
     try:
         connect()
-        with requests.get(f"http://{server}:{port}/data.json", timeout=5) as r:
+        print('getting data...', end='')
+        with requests.get(f"http://{server}:{port}/data.json") as r:
             data = r.json()
+            r.close()
         print('got data')
-        gc.collect()
+        #gc.collect()
         return data
     except Exception as e:
-        gc.collect()
-        print('error getting data', e)
+        #gc.collect()
+        template = "An exception of type {0} occurred. Arguments:\n{1!r}"
+        message = template.format(type(e).__name__, e.args)
+        print(message)
         return None
 
 
@@ -261,7 +265,7 @@ server_active = False
 
 while True:
     # hourly check
-    if last_check_time is None or time.monotonic() > last_check_time + 3600:
+    if last_check_time is None or time.monotonic() > last_check_time + 1800:
         try:
             update_time(
                 small=True, show_colon=True
@@ -269,7 +273,7 @@ while True:
             get_local_time()  # Synchronize Board's clock to Internet
             last_check_time = time.monotonic()
             # print memory usage once an hour
-            print("current mem", gc.mem_free())
+            #print("current mem", gc.mem_free())
         except RuntimeError as e:
             print("Some error occured, retrying! -", e)
 
@@ -304,8 +308,8 @@ while True:
             background_group[5].hidden = True
             server_active = False
             # check again in 20 seconds
-            last_check_devices = time.monotonic() + 20
-            print("the server is not responding")
+            last_check_devices = time.monotonic() + 30
+            #print("the server is not responding")
         #print("current free memory:", gc.mem_free())
 
     if server_active:
@@ -315,5 +319,5 @@ while True:
 
     # gc.collect()
     # print(gc.mem_free())
-    print('tick')
+    #print('tick')
     time.sleep(1)

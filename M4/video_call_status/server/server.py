@@ -7,9 +7,10 @@ import threading
 import subprocess
 from flask import Flask, jsonify
 
-DATA_FILE_PATH="data.json"
+DATA_FILE_PATH = "data.json"
 DATA_LOCK = threading.Lock()
 DEBUG = True
+MIC_CLIENTS = []
 
 app = Flask(__name__)
 
@@ -57,6 +58,7 @@ def main():
         previous_mic_active_state = True
         cam_active_state = False
         mic_active_state = False
+        mic_active_clients = set()
 
         states = {"camActive": cam_active_state, "micActive": mic_active_state}
 
@@ -64,16 +66,23 @@ def main():
             line = line.decode("utf-8").rstrip()
 
             # Microphone
-            if "PublishRecordingClientInfo: Report" in line:
-                if 'yes' in line:
-                    mic_active_state = True
-                elif 'no' in line:
-                    mic_active_state = False
+            if "PublishRecordingClientInfo: Report client" in line:
+                parts = line.split()
+                client_id = parts[parts.index("client") + 1]
+                running_state = parts[parts.index("running:") + 1]
+
+                if running_state == "yes":
+                    mic_active_clients.add(client_id)
+                elif running_state == "no":
+                    mic_active_clients.remove(client_id)
+                mic_active_state = bool(len(mic_active_clients) > 0)
 
                 states["micActive"] = mic_active_state
 
             if mic_active_state != previous_mic_active_state:
-                logging.debug(f"Microphone is {'active' if mic_active_state else 'not active'}")
+                logging.debug(
+                    f"Microphone is {'active' if mic_active_state else 'not active'}"
+                )
                 with DATA_LOCK:
                     write_file(states)
                 previous_mic_active_state = mic_active_state
@@ -93,7 +102,9 @@ def main():
             states["camActive"] = cam_active_state
 
             if cam_active_state != previous_cam_active_state:
-                logging.debug(f"Camera is {'active' if cam_active_state else 'not active'}")
+                logging.debug(
+                    f"Camera is {'active' if cam_active_state else 'not active'}"
+                )
                 with DATA_LOCK:
                     write_file(states)
                 previous_cam_active_state = cam_active_state

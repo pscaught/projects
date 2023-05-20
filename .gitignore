@@ -1,6 +1,7 @@
 *.DS_Store
 *.fseventsd
 *.metadata_never_index
+backup/
 boot_out.txt
 lib/
 secrets.py
