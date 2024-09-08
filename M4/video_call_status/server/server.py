@@ -88,11 +88,9 @@ class StateManager:
         if webrtc is not None:
             self.update_webrtc_mic_state(webrtc)
 
-        new_state = self.states["micActive"]
-        if not self.states["systemMicActive"]:
+        new_state = self.states["webrtcMicActive"]
+        if not self.states["systemMicActive"] and not self.states["webrtcMicActive"]:
             new_state = False
-        if self.states["webrtcMicActive"]:
-            new_state = True
 
         if self.last_states["micActive"] != new_state:
             self.states["micActive"] = new_state
