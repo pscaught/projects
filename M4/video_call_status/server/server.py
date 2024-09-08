@@ -1,21 +1,223 @@
 #!/usr/bin/env python3
-"""Monitor whether a camera or microphone is active on macOS"""
 
 import json
 import logging
 import re
-import select
 import subprocess
+import sys
 import time
-
-# import threading
 from flask import Flask, jsonify
-from multiprocessing import Process, Lock
+from multiprocessing import Process, Queue, Lock
+
 
 DATA_FILE_PATH = "data.json"
 DATA_LOCK = Lock()
 
 app = Flask(__name__)
+
+chrome_debug_cmd = [
+        "tail",
+        "-f",
+        "/Users/scott/Library/Application Support/Google/Chrome/chrome_debug.log",
+    ]
+log_stream_cmd = [
+        "log",
+        "stream",
+        "--predicate",
+        '(subsystem contains "com.apple.UVCExtension" and composedMessage contains "Post PowerLog") || eventMessage contains "Post event kCameraStream" || composedMessage contains "PublishRecordingClientInfo: Report"',
+    ]
+
+
+class CommandStreamReader:
+    def __init__(self, cmd, queue, _type):
+        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.queue = queue
+        self._type = _type
+    def stream_output(self):
+        while True:
+            output = self.process.stdout.readline().decode('utf-8').strip()
+            if output == '' and self.process.poll() is not None:
+                break
+            self.queue.put({'type': self._type, 'data': output})
+            self.queue.put({'type': self._type, 'data': ''}) # clear the buffer
+
+
+class StateManager:
+    def __init__(self, data_file_path, lock):
+        self.data_file_path = data_file_path
+        self.lock = lock
+        self.states = {"camActive": False, "webrtcMicActive": False, "systemMicActive": False, "micActive": False}
+        self.last_states = {"camActive": None, "webrtcMicActive": None, "systemMicActive": False, "micActive": False}
+        self.load_state()
+
+    def load_state(self):
+        try:
+            with open(self.data_file_path, "r", encoding="utf-8") as f:
+                self.states = json.load(f)
+        except FileNotFoundError:
+            pass  # No previous state file
+
+    def save_state(self):
+        with self.lock:
+            with open(self.data_file_path, "w", encoding="utf-8") as f:
+                json.dump(self.states, f)
+
+    def update_cam_state(self, new_state):
+        if self.states["camActive"] != new_state:
+            logging.info(f"Camera is {'not ' if not new_state else ''}active")
+            self.states["camActive"] = new_state
+            self.save_state()
+        self.last_states["camActive"] = new_state
+
+    def update_mic_state(self, system, webrtc):
+        if system is not None:
+            self.update_system_mic_state(system)
+        if webrtc is not None:
+            self.update_webrtc_mic_state(webrtc)
+
+        new_state = self.states["micActive"]
+        if not self.states["systemMicActive"]:
+            new_state = False
+        if self.states["webrtcMicActive"]:
+            new_state = True
+
+        if self.last_states["micActive"] != new_state:
+            self.states["micActive"] = new_state
+            logging.info(f"Mic is {'active' if new_state else 'not active'}")
+            self.save_state()
+
+        self.last_states["micActive"] = self.states["micActive"]
+
+    def update_system_mic_state(self, new_state):
+        if self.states["systemMicActive"] != new_state:
+            logging.info(f"Mic (system) is {'active' if new_state else 'not active'}")
+            self.states["systemMicActive"] = new_state
+            self.save_state()
+        self.last_states["systemMicActive"] = new_state
+
+    def update_webrtc_mic_state(self, new_state):
+        if self.states["webrtcMicActive"] != new_state:
+            logging.info(f"Mic (webrtc) is {'active' if new_state else 'not active'}")
+            self.states["webrtcMicActive"] = new_state
+            self.save_state()
+        self.last_states["webrtcMicActive"] = new_state
+
+class SystemMicMonitor:
+    def __init__(self, state_manager):
+        self.state_manager = state_manager
+        self.system_mic_active_clients = set()
+
+    def process_log_data(self, data):
+        if "PublishRecordingClientInfo: Report client" in data:
+            parts = data.split()
+            client_id = parts[parts.index("client") + 1]
+            running_state = parts[parts.index("running:") + 1]
+            if running_state == "yes":
+                self.system_mic_active_clients.add(client_id)
+            elif running_state == "no":
+                try:
+                    self.system_mic_active_clients.remove(client_id)
+                except KeyError:
+                    logging.error("Key not found")
+            self.state_manager.update_mic_state(bool(len(self.system_mic_active_clients) > 0), None)
+
+
+class WebRTCMicMonitor:
+    def __init__(self, state_manager):
+        self.state_manager = state_manager
+        self.enabled_ids = []
+        self.media_stream_ids = []
+        self.last_len_enabled_ids = 0
+        self.last_len_media_stream_ids = 0
+
+        self.mic_active = False
+        self.mic_last_state = False
+
+        self.state_change = time.monotonic()
+
+
+    def extract_id(self, string):
+        """Extracts the ID from a string in the given format.
+
+        Args:
+            string: The input string.
+
+        Returns:
+            The extracted ID, or None if no ID was found.
+        """
+
+        match = re.search(r"id: (\w+-\w+-\w+-\w+-\w+)", string)
+        if match:
+            return match.group(1)
+        else:
+            return None
+
+
+    def process_log_data(self, data):
+        _id = self.extract_id(data)
+
+        if (
+            "MediaStreamTrackImpl() [kind: audio" in data
+            and "remote=false" in data
+        ):
+            if len(self.enabled_ids) == 0:
+                self.media_stream_ids.append(_id)
+                logging.debug("New media stream ID: %s", _id)
+                self.state_change = time.monotonic()
+        if "setEnabled({enabled=true}) [kind: audio" in data:
+            self.enabled_ids.append(_id)
+            logging.debug("Audio track enabled: %s", _id)
+            self.state_change = time.monotonic()
+        if "setEnabled({enabled=false}) [kind: audio" in data:
+            if len(self.media_stream_ids) > 0:
+                self.enabled_ids = [
+                    x for x in self.enabled_ids if x not in self.media_stream_ids
+                ]
+                self.media_stream_ids = []
+            try:
+                self.enabled_ids.remove(_id)
+                self.state_change = time.monotonic()
+            except ValueError:
+                logging.debug("Failed to remove ID: %s", _id)
+
+        # Check if the lengths of the lists have changed
+        if (
+            len(self.media_stream_ids) != self.last_len_media_stream_ids
+            or len(self.enabled_ids) != self.last_len_enabled_ids
+        ):
+            logging.debug(
+                f"Media stream or enabled IDs changed {len(self.media_stream_ids)} {len(self.enabled_ids)}"
+            )
+            self.last_len_media_stream_ids = len(self.media_stream_ids)
+            self.last_len_enabled_ids = len(self.enabled_ids)
+
+        if time.monotonic() - self.state_change > 0.1:
+            if len(self.media_stream_ids) > 0 or len(self.enabled_ids) > 0:
+                self.mic_active = True
+            else:
+                self.mic_active = False
+
+        state_manager.update_mic_state(None, self.mic_active)
+
+class CameraMonitor:
+    def __init__(self, state_manager):
+        self.state_manager = state_manager
+
+    def process_log_data(self, data):
+        if ("kCameraStreamStart" in data or '"VDCAssistant_Power_State" = On;' in data):
+            logging.debug("Camera saw on")
+            self.state_manager.update_cam_state(True)
+        elif ("kCameraStreamStop" in data or '"VDCAssistant_Power_State" = Off;' in data):
+            logging.debug("Camera saw off")
+            self.state_manager.update_cam_state(False)
+
+
+def stream_command(command, queue, _type):
+    stream_reader = CommandStreamReader(command, queue, _type)
+    stream_reader.stream_output()
+
+
+
 
 
 @app.route("/")
@@ -31,7 +233,7 @@ def get_data():
         with open(DATA_FILE_PATH, "r", encoding="utf-8") as _f:
             _data = json.load(_f)
     except json.JSONDecodeError:
-        _data = {"camActive": False, "micActive": False}
+        _data = {"camActive": False, "systemMicActive": False, "webrtcMicActive": False, "micActive": False}
     return jsonify(_data)
 
 
@@ -39,214 +241,39 @@ def start_flask_app():
     app.run(host="192.168.10.10", port=8000, debug=True, use_reloader=False)
 
 
-def write_file(_data):
-    """Helper function to write data to file"""
-    with open(DATA_FILE_PATH, "w", encoding="utf-8") as _f:
-        _f.write(json.dumps(_data))
 
+if __name__ == '__main__':
 
-def extract_id(string):
-    """Extracts the ID from a string in the given format.
-
-    Args:
-        string: The input string.
-
-    Returns:
-        The extracted ID, or None if no ID was found.
-    """
-
-    match = re.search(r"id: (\w+-\w+-\w+-\w+-\w+)", string)
-    if match:
-        return match.group(1)
-    else:
-        return None
-
-
-def main():
-    """Main function that follows the output of a `log stream` command with
-    custom filters that check for hints that a camera or microphone has been
-    activated or deactivated. Results are then stored in a json file.
-    """
-    chrome_debug_cmd = [
-        "tail",
-        "-f",
-        "/Users/scott/Library/Application Support/Google/Chrome/chrome_debug.log",
-    ]
-    log_stream_cmd = [
-        "log",
-        "stream",
-        "--predicate",
-        '(subsystem contains "com.apple.UVCExtension" and composedMessage contains "Post PowerLog") || eventMessage contains "Post event kCameraStream" || composedMessage contains "PublishRecordingClientInfo: Report"',
-    ]
-
-    # Merge the output of `log stream` and `tail -f chrome_debug.log` into a single stream
-    with subprocess.Popen(
-        log_stream_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-    ) as log_stream, subprocess.Popen(
-        chrome_debug_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-    ) as chrome_debug_stream:
-        # Definitive mic states
-        mic_active = False
-        mic_last_state = False
-
-        #  `log stream` vars. We can see reliably whether the camera is in use.
-        cam_active = False
-        cam_last_state = True
-        system_mic_active = False
-        system_mic_active_clients = set()
-        system_mic_last_state = False
-
-        # 'chrome_debug.log' vars. We we can see if Chrome is using the Mic.
-        enabled_ids = []
-        media_stream_ids = []
-
-        chrome_webrtc_mic_active = False
-        chrome_webrtc_mic_last_state = False
-
-        last_len_enabled_ids = 0
-        last_len_media_stream_ids = 0
-
-        state_change = (
-            0  # used for debouncing changing state between active and inactive
-        )
-
-        states = {
-            "camActive": cam_active,
-            "micActive": system_mic_active and chrome_webrtc_mic_active,
-        }
-
-        chrome_poll = select.poll()
-        log_poll = select.poll()
-
-        chrome_poll.register(chrome_debug_stream.stdout)
-        log_poll.register(log_stream.stdout)
-
-        while True:
-            if log_poll.poll(1):
-                started_reading = time.monotonic()
-                for log_line in log_stream.stdout:
-                    log_line = log_line.decode().strip()
-
-                    # System Microphone. Handle parsing to determine if the system
-                    # Mic is active.
-                    if "PublishRecordingClientInfo: Report client" in log_line:
-                        parts = log_line.split()
-                        client_id = parts[parts.index("client") + 1]
-                        running_state = parts[parts.index("running:") + 1]
-
-                        if running_state == "yes":
-                            system_mic_active_clients.add(client_id)
-                        elif running_state == "no":
-                            try:
-                                system_mic_active_clients.remove(client_id)
-                            except KeyError:
-                                logging.error("Key not found")
-                        system_mic_active = bool(len(system_mic_active_clients) > 0)
-                        break
-
-                    # Camera. Handle parsing to determine if the system camera
-                    # is enabled.
-                    if (
-                        "kCameraStreamStart" in log_line
-                        or '"VDCAssistant_Power_State" = On;' in log_line
-                    ):
-                        logging.info("Camera saw on")
-                        cam_active = True
-                    elif (
-                        "kCameraStreamStop" in log_line
-                        or '"VDCAssistant_Power_State" = Off;' in log_line
-                    ):
-                        logging.info("Camera saw off")
-                        cam_active = False
-
-                    states["camActive"] = cam_active
-
-                    if cam_active != cam_last_state:
-                        logging.info(
-                            f"Camera is {'active' if cam_active else 'not active'}"
-                        )
-                        with DATA_LOCK:
-                            write_file(states)
-                        cam_last_state = cam_active
-                        break
-                    if time.monotonic() - started_reading > 0.2:
-                        break
-
-
-            # Chrome WebRTC Microphone. Handle parsing to determine if
-            # Chrome is using the Mic with WebRTC. (Meet and Teams)
-
-            elif chrome_poll.poll(1):
-                chrome_line = chrome_debug_stream.stdout.readline().decode()
-                _id = extract_id(chrome_line)
-
-                if (
-                    "MediaStreamTrackImpl() [kind: audio" in chrome_line
-                    and "remote=false" in chrome_line
-                ):
-                    if len(enabled_ids) == 0:
-                        media_stream_ids.append(_id)
-                        logging.debug("New media stream ID: %s", _id)
-                        state_change = time.monotonic()
-                if "setEnabled({enabled=true}) [kind: audio" in chrome_line:
-                    enabled_ids.append(_id)
-                    logging.debug("Audio track enabled: %s", _id)
-                    state_change = time.monotonic()
-                if "setEnabled({enabled=false}) [kind: audio" in chrome_line:
-                    logging.debug("Audio track disabled: %s", _id)
-                    state_change = time.monotonic()
-                    if len(media_stream_ids) > 0:
-                        enabled_ids = [
-                            x for x in enabled_ids if x not in media_stream_ids
-                        ]
-                        media_stream_ids = []
-                    try:
-                        enabled_ids.remove(_id)
-                    except ValueError:
-                        logging.debug("Failed to remove ID: %s", _id)
-
-                # Check if the lengths of the lists have changed
-                if (
-                    len(media_stream_ids) != last_len_media_stream_ids
-                    or len(enabled_ids) != last_len_enabled_ids
-                ):
-                    logging.info(
-                        f"Media stream or enabled IDs changed {len(media_stream_ids)} {len(enabled_ids)}"
-                    )
-                    last_len_media_stream_ids = len(media_stream_ids)
-                    last_len_enabled_ids = len(enabled_ids)
-
-                if time.monotonic() - state_change > 0.2:
-                    if len(media_stream_ids) > 0 or len(enabled_ids) > 0:
-                        chrome_webrtc_mic_active = True
-                    else:
-                        chrome_webrtc_mic_active = False
-
-                if chrome_webrtc_mic_active is not chrome_webrtc_mic_last_state:
-                    logging.info(
-                        "Mic active (webrtc)"
-                        if chrome_webrtc_mic_active
-                        else "Mic inactive (webrtc)"
-                    )
-                    chrome_webrtc_mic_last_state = chrome_webrtc_mic_active
-
-                mic_active = system_mic_active and chrome_webrtc_mic_active
-
-                if mic_active != mic_last_state:
-                    states["micActive"] = mic_active
-                    logging.info(
-                        f"Microphone is {'active' if mic_active else 'not active'}"
-                    )
-                    with DATA_LOCK:
-                        write_file(states)
-                    mic_last_state = mic_active
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    # Start the Flask app in a separate thread
     flask_thread = Process(target=start_flask_app)
     flask_thread.start()
 
-    # Start the data processing in the main thread
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == '-v':
+        log_level=logging.DEBUG
+    else:
+        log_level=logging.INFO
+    logging.basicConfig(level=log_level)
+
+    state_manager = StateManager(DATA_FILE_PATH, DATA_LOCK)
+    system_mic_monitor = SystemMicMonitor(state_manager)
+    webrtc_mic_monitor = WebRTCMicMonitor(state_manager)
+    cam_monitor = CameraMonitor(state_manager)
+
+    queue = Queue()
+
+    stream_log_thread = Process(target=stream_command, args=(log_stream_cmd, queue, 'log',))
+    stream_log_thread.start()
+    chrome_thread = Process(target=stream_command, args=(chrome_debug_cmd, queue, 'chrome',))
+    chrome_thread.start()
+
+    while True:
+        log = False
+        chrome = False
+        data = queue.get().get('data', '')
+        _type = queue.get().get('type', '')
+        if _type == 'chrome':
+            webrtc_mic_monitor.process_log_data(data)
+        elif _type == 'log':
+            cam_monitor.process_log_data(data)
+            system_mic_monitor.process_log_data(data)
+
+
