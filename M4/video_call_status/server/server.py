@@ -16,38 +16,51 @@ DATA_LOCK = Lock()
 app = Flask(__name__)
 
 chrome_debug_cmd = [
-        "tail",
-        "-f",
-        "/Users/scott/Library/Application Support/Google/Chrome/chrome_debug.log",
-    ]
+    "tail",
+    "-f",
+    "/Users/scott/Library/Application Support/Google/Chrome/chrome_debug.log",
+]
 log_stream_cmd = [
-        "log",
-        "stream",
-        "--predicate",
-        '(subsystem contains "com.apple.UVCExtension" and composedMessage contains "Post PowerLog") || eventMessage contains "Post event kCameraStream" || composedMessage contains "PublishRecordingClientInfo: Report"',
-    ]
+    "log",
+    "stream",
+    "--predicate",
+    '(subsystem contains "com.apple.UVCExtension" and composedMessage contains "Post PowerLog") || eventMessage contains "Post event kCameraStream" || composedMessage contains "PublishRecordingClientInfo: Report"',
+]
 
 
 class CommandStreamReader:
     def __init__(self, cmd, queue, _type):
-        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         self.queue = queue
         self._type = _type
+
     def stream_output(self):
         while True:
-            output = self.process.stdout.readline().decode('utf-8').strip()
-            if output == '' and self.process.poll() is not None:
+            output = self.process.stdout.readline().decode("utf-8").strip()
+            if output == "" and self.process.poll() is not None:
                 break
-            self.queue.put({'type': self._type, 'data': output})
-            self.queue.put({'type': self._type, 'data': ''}) # clear the buffer
+            self.queue.put({"type": self._type, "data": output})
+            self.queue.put({"type": self._type, "data": ""})  # clear the buffer
 
 
 class StateManager:
     def __init__(self, data_file_path, lock):
         self.data_file_path = data_file_path
         self.lock = lock
-        self.states = {"camActive": False, "webrtcMicActive": False, "systemMicActive": False, "micActive": False}
-        self.last_states = {"camActive": None, "webrtcMicActive": None, "systemMicActive": False, "micActive": False}
+        self.states = {
+            "camActive": False,
+            "webrtcMicActive": False,
+            "systemMicActive": False,
+            "micActive": False,
+        }
+        self.last_states = {
+            "camActive": None,
+            "webrtcMicActive": None,
+            "systemMicActive": False,
+            "micActive": False,
+        }
         self.load_state()
 
     def load_state(self):
@@ -102,6 +115,7 @@ class StateManager:
             self.save_state()
         self.last_states["webrtcMicActive"] = new_state
 
+
 class SystemMicMonitor:
     def __init__(self, state_manager):
         self.state_manager = state_manager
@@ -119,7 +133,9 @@ class SystemMicMonitor:
                     self.system_mic_active_clients.remove(client_id)
                 except KeyError:
                     logging.error("Key not found")
-            self.state_manager.update_mic_state(bool(len(self.system_mic_active_clients) > 0), None)
+            self.state_manager.update_mic_state(
+                bool(len(self.system_mic_active_clients) > 0), None
+            )
 
 
 class WebRTCMicMonitor:
@@ -134,7 +150,6 @@ class WebRTCMicMonitor:
         self.mic_last_state = False
 
         self.state_change = time.monotonic()
-
 
     def extract_id(self, string):
         """Extracts the ID from a string in the given format.
@@ -152,14 +167,10 @@ class WebRTCMicMonitor:
         else:
             return None
 
-
     def process_log_data(self, data):
         _id = self.extract_id(data)
 
-        if (
-            "MediaStreamTrackImpl() [kind: audio" in data
-            and "remote=false" in data
-        ):
+        if "MediaStreamTrackImpl() [kind: audio" in data and "remote=false" in data:
             if len(self.enabled_ids) == 0:
                 self.media_stream_ids.append(_id)
                 logging.debug("New media stream ID: %s", _id)
@@ -199,15 +210,16 @@ class WebRTCMicMonitor:
 
         state_manager.update_mic_state(None, self.mic_active)
 
+
 class CameraMonitor:
     def __init__(self, state_manager):
         self.state_manager = state_manager
 
     def process_log_data(self, data):
-        if ("kCameraStreamStart" in data or '"VDCAssistant_Power_State" = On;' in data):
+        if "kCameraStreamStart" in data or '"VDCAssistant_Power_State" = On;' in data:
             logging.debug("Camera saw on")
             self.state_manager.update_cam_state(True)
-        elif ("kCameraStreamStop" in data or '"VDCAssistant_Power_State" = Off;' in data):
+        elif "kCameraStreamStop" in data or '"VDCAssistant_Power_State" = Off;' in data:
             logging.debug("Camera saw off")
             self.state_manager.update_cam_state(False)
 
@@ -215,9 +227,6 @@ class CameraMonitor:
 def stream_command(command, queue, _type):
     stream_reader = CommandStreamReader(command, queue, _type)
     stream_reader.stream_output()
-
-
-
 
 
 @app.route("/")
@@ -233,7 +242,12 @@ def get_data():
         with open(DATA_FILE_PATH, "r", encoding="utf-8") as _f:
             _data = json.load(_f)
     except json.JSONDecodeError:
-        _data = {"camActive": False, "systemMicActive": False, "webrtcMicActive": False, "micActive": False}
+        _data = {
+            "camActive": False,
+            "systemMicActive": False,
+            "webrtcMicActive": False,
+            "micActive": False,
+        }
     return jsonify(_data)
 
 
@@ -241,16 +255,14 @@ def start_flask_app():
     app.run(host="192.168.10.10", port=8000, debug=True, use_reloader=False)
 
 
-
-if __name__ == '__main__':
-
+if __name__ == "__main__":
     flask_thread = Process(target=start_flask_app)
     flask_thread.start()
 
-    if len(sys.argv) > 1 and sys.argv[1] == '-v':
-        log_level=logging.DEBUG
+    if len(sys.argv) > 1 and sys.argv[1] == "-v":
+        log_level = logging.DEBUG
     else:
-        log_level=logging.INFO
+        log_level = logging.INFO
     logging.basicConfig(level=log_level)
 
     state_manager = StateManager(DATA_FILE_PATH, DATA_LOCK)
@@ -260,20 +272,32 @@ if __name__ == '__main__':
 
     queue = Queue()
 
-    stream_log_thread = Process(target=stream_command, args=(log_stream_cmd, queue, 'log',))
+    stream_log_thread = Process(
+        target=stream_command,
+        args=(
+            log_stream_cmd,
+            queue,
+            "log",
+        ),
+    )
     stream_log_thread.start()
-    chrome_thread = Process(target=stream_command, args=(chrome_debug_cmd, queue, 'chrome',))
+    chrome_thread = Process(
+        target=stream_command,
+        args=(
+            chrome_debug_cmd,
+            queue,
+            "chrome",
+        ),
+    )
     chrome_thread.start()
 
     while True:
         log = False
         chrome = False
-        data = queue.get().get('data', '')
-        _type = queue.get().get('type', '')
-        if _type == 'chrome':
+        data = queue.get().get("data", "")
+        _type = queue.get().get("type", "")
+        if _type == "chrome":
             webrtc_mic_monitor.process_log_data(data)
-        elif _type == 'log':
+        elif _type == "log":
             cam_monitor.process_log_data(data)
             system_mic_monitor.process_log_data(data)
-
-
